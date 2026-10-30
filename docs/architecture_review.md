@@ -330,7 +330,7 @@ So transport and storage both depend on `event` and never on each other, which i
 | A4 | Event ID | SDK generates a UUIDv7 (time-ordered, index-friendly); required; stable across retries; dedup on `(project, event_id)` | Server-generated IDs make deduplication impossible |
 | A5 | Per-process fields | One `source` block per batch (service, environment, app version, hostname, SDK version). The stored event still has every §4 field | Per-event fields (as in the §4 table) map more simply but send more bytes |
 | A6 | Attribute values | Flat map of key → scalar (string, int64, double, bool) | `map<string,string>` loses types; `Struct` allows nesting and is hard to bound |
-| A7 | Stack trace | Repeated `{function, file, line}` frames, capped, captured where `Error()` is called | A single string is simpler but harder to limit or group later |
+| A7 | Stack trace | Repeated `{function, file, line}` frames, capped, captured where `Error()` is called; first reuse a stack already attached to the error via a `Callers() []uintptr` method (no extra dependency) | A single string is simpler but harder to limit or group later |
 | A8 | `error_type` | Type of the innermost error in the `Unwrap` chain (first error for `errors.Join`) | Outermost type, usually `*fmt.wrapError` |
 | A9 | Severities | `UNSPECIFIED` (rejected), `INFO`, `WARNING`, `ERROR` | Confirm: no DEBUG or FATAL |
 | A10 | Fields to add | `app_version` (fixes the §3.1/§4 gap), server-set `received_at` and `project`; `hostname` optional | Each one needs a decision |
@@ -537,7 +537,11 @@ These run the real SDK against the real service, over TLS with test certificates
 
 ## Next steps
 
-Implementation is on hold until this review is approved. Before Phase 1 starts, these are needed:
+**Direction update (2026-10-30):** v1 will match Bugsnag's behaviour (no retries, Bugsnag-style panic handling) and deliver over gRPC instead of HTTP. Retries, batching and the other reliability work above become later optimizations. The `v1_bugsnag_parity` and `v1_status` columns in the CSV show what this means for each decision. Where parity conflicts with the proposal, the row is marked for confirmation rather than changed silently.
+
+Implementation is on hold until this review is approved. Every decision is listed in [decision_questions.csv](decision_questions.csv) with its options, the recommended option, and how Bugsnag handles the same case. Fill in `your_answer` and `your_notes` and return it as `answers.csv`. The CSV splits B1, B5 and B11 into `a`/`b` rows and adds B5b (configuration from environment variables).
+
+Before Phase 1 starts, these are needed:
 
 - **Groups A and B:** approval or changes. Approving the recommendations as-is is fine.
 - **B9:** the VCS host and organization for module paths.
