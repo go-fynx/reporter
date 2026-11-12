@@ -8,6 +8,7 @@ An internal replacement for Bugsnag: applications send log and error events to a
 | Contract (`.proto` and generated code) | [reporter-go/proto](reporter-go/proto/reporter/v1/reporter.proto) | Done |
 | Go SDK `reporter-go` | [reporter-go](reporter-go) | Ready to use |
 
+- **Step-by-step setup (install the service with `go install`, add the SDK to your service):** [docs/setup_guide.md](docs/setup_guide.md)
 - **Reporting from a Go service:** [docs/sdk.md](docs/sdk.md)
 - **Using the service from another language:** [docs/api.md](docs/api.md)
 - **Deploying and running the service:** [docs/service.md](docs/service.md)

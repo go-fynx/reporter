@@ -10,11 +10,7 @@ Requires Go 1.27. The SDK's only dependencies are `connectrpc.com/connect/v2` an
 go get github.com/go-fynx/reporter/reporter-go@latest
 ```
 
-The SDK is a module inside the `go-fynx/reporter` repository. Its releases are tagged `reporter-go/vX.Y.Z`. If the repository is private, tell Go not to use the public proxy for it:
-
-```sh
-go env -w GOPRIVATE=github.com/go-fynx/*
-```
+The SDK is a module inside the public `go-fynx/reporter` repository. Its releases are tagged `reporter-go/vX.Y.Z`; pin one with `@vX.Y.Z`. Until the first release is tagged, `@latest` takes the newest commit on `main`.
 
 ## Quick start
 
