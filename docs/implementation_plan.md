@@ -1,6 +1,6 @@
 # Implementation plan: reporter v1
 
-**Status:** Final draft. Every decision that blocks implementation is answered; waiting for approval to start Phase 1. No code has been written.
+**Status:** Approved. The reporter service and the Go SDK are built; load testing and the pilot remain. See [section 9](#9-progress) for what is done.
 **Date:** 2026-11-12
 **Based on:** [reporter_proposal.md](reporter_proposal.md), [architecture_review.md](architecture_review.md), [answers.csv](answers.csv)
 
@@ -62,7 +62,7 @@ Work that Bugsnag doesn't do, such as retries, batching, `Flush`/`Close` and met
 | B5b | `REPORTER_*` environment variables fill in unset configuration | Parity |
 | Q4 | `Info` and `Warn` helpers (no error, no stack trace) and `Error` (`Notify` at ERROR) next to the Bugsnag-style `Notify` | Answered |
 | B6 | No metrics in v1; Prometheus later | Answered |
-| B7 | Panic monitor process (panicwrap), `AutoNotify`, `Recover`, net/http middleware | Parity |
+| B7 | Panic monitor process (as panicwrap does; built in-house, see section 9), `AutoNotify`, `Recover`, net/http middleware | Parity |
 | B8 | No slog adapter | Parity |
 | B9, B11a | One repo: the service `github.com/go-fynx/reporter` at the root, and the SDK `github.com/go-fynx/reporter/reporter-go` (package `reporter`) as a nested module that holds the `.proto` and generated code; no separate proto module | Answered, plus Q1 and Q2 |
 | B10 | buf and ConnectRPC: one endpoint for gRPC and HTTP/JSON | Answered, plus Q3 |
@@ -138,16 +138,18 @@ reporter/                              module github.com/go-fynx/reporter  (the 
 ├── go.mod                             replace github.com/go-fynx/reporter/reporter-go => ./reporter-go
 ├── Makefile                           tools, generate, lint, test, test-integration, build
 ├── .github/workflows/ci.yml           lint + tests; MongoDB service container for integration tests
-├── cmd/reporter/                      `reporter serve`, `reporter keygen`
+├── cmd/reporter/                      `reporter serve`, `check-config`, `keygen`, `version`
+├── deploy/                            config.example.json, config.dev.json, reporter.service (systemd)
 ├── internal/
-│   ├── config/                        flags and REPORTER_SERVER_* environment variables
-│   ├── event/                         internal Event type, Validate, Normalize, redaction
+│   ├── app/                           http.Server, TLS / h2c, size and in-flight limits, health, shutdown, wiring
+│   ├── config/                        JSON configuration file: defaults and validation
+│   ├── event/                         internal Event type, Validate, redaction
 │   ├── ingest/                        Connect handler, proto <-> event conversion, Processor interface
 │   ├── auth/                          API-key check, per-project rate limit
 │   ├── processor/memory/              in-memory processor for tests
 │   ├── processor/devlog/              logs events; local development only
-│   ├── storage/mongo/                 MongoDB processor (mongo-driver v2)
-│   └── server/                        http.Server, TLS / h2c, size and in-flight limits, health, shutdown
+│   ├── processor/processortest/       tests every processor must pass
+│   └── storage/mongostore/            MongoDB processor (mongo-driver v2)
 ├── reporter-go/                       module github.com/go-fynx/reporter/reporter-go, package reporter (the SDK)
 │   ├── go.mod
 │   ├── buf.yaml, buf.gen.yaml
@@ -164,9 +166,8 @@ reporter/                              module github.com/go-fynx/reporter  (the 
 - **SDK dependencies:**
   - Connect v2;
   - protobuf;
-  - `github.com/bugsnag/panicwrap` (MIT);
-  - `github.com/pkg/errors`, only to read stacks from pkg/errors values, as Bugsnag does.
   - UUIDs come from the Go standard library.
+  - As built, the crash monitor is the SDK's own code rather than `github.com/bugsnag/panicwrap`, and pkg/errors stacks are read by reflection, so neither package is a dependency (see section 9).
 
 ### 5.2 Contract
 
@@ -247,7 +248,7 @@ Bugsnag's `AppType` and `AutoCaptureSessions` aren't carried over, because sessi
 - no data races (bugsnag-go has one on its shutdown flag);
 - calling `Configure` twice is safe (bugsnag-go starts another delivery goroutine);
 - the panic monitor isn't started inside `go test` binaries;
-- the panic monitor uses its own panicwrap cookie, so it can't take over bugsnag-go's monitor during the pilot.
+- the panic monitor uses its own environment cookie, so it can't take over bugsnag-go's monitor during the pilot.
 
 **Capture path** (the caller's goroutine):
 1. Check the environment filter.
@@ -262,7 +263,7 @@ Bugsnag's `AppType` and `AutoCaptureSessions` aren't carried over, because sessi
 
 Turning stack addresses into frames, and encoding the protobuf message, happen on the delivery goroutine.
 
-**Panic handling.** `Configure` starts the monitor with `bugsnag/panicwrap` on Linux and macOS:
+**Panic handling.** `Configure` starts the monitor on Linux and macOS, the way `bugsnag/panicwrap` does (as built, with the SDK's own implementation; see section 9):
 - **How it works:**
   - The program re-runs itself as a monitor process, and the app's stderr is piped to it.
   - When the app crashes, the monitor parses the panic text: the message, plus the panicking goroutine's frames.
@@ -275,20 +276,20 @@ Turning stack addresses into frames, and encoding the protobuf message, happen o
 **Listening**
 - One port.
 - TLS from certificate and key files, serving HTTP/1.1 and HTTP/2; gRPC needs HTTP/2.
-- `REPORTER_SERVER_INSECURE=true` serves plaintext HTTP/1.1 and h2c, for local development only.
+- `"server": {"insecure": true}` serves plaintext HTTP/1.1 and h2c, for local development only; refused when `environment` is `production`.
 
 **Authentication**
 - `Authorization: Bearer <key>` works for both protocols.
-- The key is hashed with SHA-256 and looked up in a JSON keys file of entries `{id, project, sha256}`.
+- The key is hashed with SHA-256 and looked up in the config file's `api_keys` entries `{id, project, sha256}`.
 - A project can have several keys, so rotation can overlap; that costs nothing.
-- `reporter keygen --project <name>` prints a new key and its keys-file entry.
+- `reporter keygen -project <name>` prints a new key and its config entry.
 
 **Request steps, in order:**
 1. Reject requests over 1 MiB.
 2. Apply the in-flight limit (over the limit → `Unavailable`, HTTP 503).
 3. Authenticate (failure → `Unauthenticated`, 401).
-4. Apply the per-project rate limit, counting events (over the limit → `ResourceExhausted`, 429).
-5. Decode the request.
+4. Decode the request. Steps 1–3 run before the body is read.
+5. Apply the per-project rate limit, counting events (over the limit → `ResourceExhausted`, 429).
 6. Validate and normalize each event.
 7. Pass the accepted events to the processor.
 8. Respond with `accepted_count` and the per-event rejections.
@@ -320,17 +321,7 @@ A processor error returns `Unavailable` (503).
 
 **Logging:** slog JSON to stdout. Authentication failures, rejections, rate-limit hits and processor errors are logged at warning level.
 
-**Configuration:** flags, with `REPORTER_SERVER_*` environment variables covering:
-- listen address;
-- TLS files;
-- insecure mode;
-- keys file;
-- MongoDB URI and database;
-- retention days per severity;
-- rate limit and burst;
-- request size and in-flight limits;
-- shutdown timeout;
-- environment.
+**Configuration:** one JSON file, passed with `-config` (decided 2026-11-12, replacing flags and environment variables). Missing fields take defaults, unknown fields are an error, and everything is validated before startup. The full reference is in [service.md](service.md#configuration).
 
 ### 5.5 Storage (MongoDB, mongo-driver v2)
 
@@ -364,10 +355,10 @@ A processor error returns `Unavailable` (503).
 
 ### 5.6 Tooling
 
-- **Tools:** buf, `protoc-gen-go` and `protoc-gen-connect-go` are pinned to fixed versions in the Makefile and installed into a repo-local `bin/` by `make tools`. Nothing is installed globally, and nothing is added to the SDK's or service's dependency graph.
+- **Tools:** buf, `protoc-gen-go`, `protoc-gen-connect-go` and staticcheck are pinned to fixed versions in the Makefile and installed into a repo-local `bin/` by `make tools`. Nothing is installed globally, and nothing is added to the SDK's or service's dependency graph.
 - **Generated code:** committed, so consumers don't need any of these tools.
-- **Lint:** `golangci-lint`, which is already installed in `~/go/bin`.
-- **Tests:** always run with `-race`. Integration tests read `REPORTER_TEST_MONGO_URI` and skip when it isn't set. Locally it points at the MongoDB installed on the development machine; CI always sets it.
+- **Lint:** `buf lint`, `go vet` and staticcheck. The golangci-lint in `~/go/bin` (v2.6.2) cannot load Go 1.27 code, so it was dropped.
+- **Tests:** run with `-race` by default (`TESTFLAGS`), which needs a C compiler. Integration tests read `REPORTER_TEST_MONGO_URI` and skip when it isn't set. Locally it points at the MongoDB installed on the development machine; CI always sets it.
 - **Go:** 1.27 for both modules. Go isn't on the PATH for non-interactive shells on this machine, so the Makefile uses `go` from your shell.
 
 ---
@@ -618,3 +609,49 @@ These run the real SDK against the real service and MongoDB, with one named test
 - A UI, and error grouping.
 - An slog adapter.
 - Moving the SDK to its own repository, if that's wanted later (it changes the import path in every service using it).
+
+---
+
+## 9. Progress
+
+### Reporter service: built (2026-11-12)
+
+| Phase | State |
+|---|---|
+| 1. Layout, tooling, contract | Done. CI workflow written but not yet run on GitHub. |
+| 2. Service ingest | Done |
+| 5. MongoDB storage | Done; tested against MongoDB 8.0 |
+| 6. End-to-end tests | Service side done: JSON and gRPC clients, TLS, auth, limits, shutdown and MongoDB. The SDK side waits for the SDK. |
+| 7. Load test | Not started. Limits and the rate limit still use the provisional defaults. |
+| 8. Pilot and production readiness | Service side done: systemd unit, operations guide, API reference. The pilot waits for the SDK. |
+
+Departures from the design above:
+- **Configuration** is a single JSON file instead of flags and environment variables, as decided on 2026-11-12.
+- **Package layout:** the HTTP server lives in `internal/app` together with the wiring, rather than in a separate `server` package, and the MongoDB package is `storage/mongostore`.
+- **Rate limit timing:** it runs after the request body is decoded, because it counts events. Size, in-flight and authentication checks still run before decoding.
+- **Unknown JSON request fields are ignored,** which is Connect's default, so newer clients work with older services. Unknown fields in the config file are still an error.
+- **Lint:** staticcheck replaces golangci-lint (see 5.6).
+
+### Go SDK: built (2026-11-12)
+
+| Phase | State |
+|---|---|
+| 3. SDK core | Done. Checklist items 1–13 in 5.3 each have a test. |
+| 4. Crash handling | Done. Checklist items 14–16 have tests, including real crashes of a helper program. |
+| 6. End-to-end tests | Done. The SDK's package-level API was tested against the real service, and a sample program against the real binary and MongoDB. |
+
+Baseline cost per call, with delivery on a fake sender: `Notify` with an error and two fields takes about 2.7 µs and 22 allocations; `Info` about 0.6 µs and 9 allocations.
+
+Departures from the design above:
+- **Own crash monitor instead of `bugsnag/panicwrap`.** Testing showed that if the monitor process dies while the program runs, panicwrap leaves the program's standard error pointing into a pipe nobody reads. Output is then lost, and once the pipe fills the program blocks on its next log line. panicwrap hides the monitor process, so there is no way to fix this from outside. The SDK's monitor (about 150 lines) behaves the same, with these differences:
+  - the program watches its monitor and takes standard error back if it dies;
+  - the monitor ignores shutdown signals;
+  - crash output passes straight through;
+  - a crash is recognised only at the start of a line.
+  This also removes panicwrap and its `kardianos/osext` dependency.
+- **No `github.com/pkg/errors` dependency.** Stacks from pkg/errors errors are read through reflection.
+- **The monitor's standard output is discarded,** so output from code before `Configure` is not printed twice.
+- **Coexistence with bugsnag-go (Phase 4) was measured** with bugsnag-go v2.6.4. Without special handling, whichever SDK was configured first reported every crash twice, because each monitor starts the other SDK's monitor. The SDK now:
+  - skips its monitor inside bugsnag-go's monitor process;
+  - starts its own monitor with `BUGSNAG_DISABLE_PANIC_HANDLER=1` and `BUGSNAG_AUTO_CAPTURE_SESSIONS=0`.
+  With that, each crash is reported once to each backend in either configuration order. Pilot setup: configure both SDKs at the start of `main`, in any order. The results are in [sdk.md](sdk.md#running-both-sdks-during-the-pilot).

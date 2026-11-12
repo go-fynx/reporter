@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+    env:
+      REPORTER_TEST_MONGO_URI: mongodb://127.0.0.1:27017
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install tools
+        run: make tools
+
+      - name: Generated code is up to date
+        run: |
+          make generate
+          test -z "$(git status --porcelain)" || { git status --porcelain; echo "run 'make generate' and commit the result"; exit 1; }
+
+      - name: Lint
+        run: make lint
+
+      - name: Test (including MongoDB)
+        run: make test-integration
+
+      - name: Build
+        run: make build

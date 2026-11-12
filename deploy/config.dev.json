@@ -1,0 +1,24 @@
+{
+  "environment": "development",
+  "server": {
+    "listen_address": "127.0.0.1:8080",
+    "insecure": true
+  },
+  "api_keys": [
+    {
+      "id": "local-dev",
+      "project": "local",
+      "sha256": "7e9f8fd111802be56c379d597842e29b2cebd35ff2133d431a49fa556a18704e"
+    }
+  ],
+  "storage": {
+    "type": "mongodb",
+    "mongodb": {
+      "uri": "mongodb://127.0.0.1:27017",
+      "database": "reporter_dev"
+    }
+  },
+  "log": {
+    "level": "debug"
+  }
+}
