@@ -3,6 +3,7 @@
 **Status:** Review awaiting approval. No implementation has started.
 **Date:** 2026-10-29
 **Reviews:** [reporter_proposal.md](reporter_proposal.md)
+**Superseded for v1 by:** [implementation_plan.md](implementation_plan.md), with decisions from [answers.csv](answers.csv) (2026-11-12)
 
 ## Current state
 
